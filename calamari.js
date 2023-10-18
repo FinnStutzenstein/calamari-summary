@@ -49,6 +49,14 @@
     );
   }
 
+  function timeAmountToSeconds(amount) {
+    if (amount.timeUnit === "HOURS") {
+      return amount.amount * 60 * 60;
+    } else {
+      throw new Error(`Unknown time amount ${JSON.stringify(amount)}`);
+    }
+  }
+
   async function main() {
     const leadingZero = (x) => ("0" + x.toString()).slice(-2);
     const fmtDate = (x) =>
@@ -125,6 +133,7 @@
       dateRange: { range: "WEEK_CURRENT", shift: 0, from: null, to: null },
       employees: [employeeId],
     });
+    console.log("employeeResponse", employeeResponse);
 
     const employee = employeeResponse.employees[0].employee;
     const firstWorkday = CREATE_DATE; // fmtDate(new Date(employee.createDate));
@@ -145,7 +154,7 @@
     const lastSundayFmt = fmtDate(lastSunday);
     const nextSundayFmt = fmtDate(nextSunday);
 
-    const response = await request("get", {
+    const worktimeResponse = await request("get", {
       dateRange: {
         range: "CUSTOM",
         shift: 0,
@@ -154,9 +163,9 @@
       },
       employees: [employee.id],
     });
+    console.log("worktimeResponse", worktimeResponse);
     const worktime = {};
-    const days = response.employees[0].days;
-    days.forEach((day) => {
+    worktimeResponse.employees[0].days.forEach((day) => {
       const d = new Date(day.date);
       const year = d.getFullYear().toString();
       const week = leadingZero(d.getWeek());
@@ -167,10 +176,15 @@
         worktime[year][week] = {
           plannedSeconds: 0,
           workedSeconds: 0,
+          gleitzeitSeconds: 0,
         };
       }
       worktime[year][week].plannedSeconds += day.summary.plannedSeconds;
       worktime[year][week].workedSeconds += day.summary.workedSeconds;
+      worktime[year][week].gleitzeitSeconds += day.absences
+        .filter((a) => a.typeName === "Gleitzeit")
+        .map((a) => timeAmountToSeconds(a.amount))
+        .reduce((sum, val) => sum + val, 0);
     });
 
     const fmt = (seconds, isDiff) => {
@@ -189,15 +203,20 @@
       }
       return `${sign}${sec}s`;
     };
-    const fmtDiff = (workedSeconds, plannedSeconds) =>
-      `${fmt(workedSeconds)}/${fmt(plannedSeconds)} (${fmt(
+    const fmtDiff = (workedSeconds, plannedSeconds, gleitzeitSeconds) => {
+      const gleitzeitString = gleitzeitSeconds
+        ? ` (Gleitzeit: ${fmt(-gleitzeitSeconds, true)})`
+        : "";
+      return `${fmt(workedSeconds)}/${fmt(plannedSeconds)} (${fmt(
         workedSeconds - plannedSeconds,
         true
-      )})`;
+      )})${gleitzeitString}`;
+    };
 
     const years = Object.keys(worktime).sort();
     let globalWorkedSeconds = 0;
     let globalPlannedSeconds = 0;
+    let globalGleitzeitSeconds = 0;
     years.forEach((year) => {
       const weeks = Object.keys(worktime[year]).sort();
       log();
@@ -206,9 +225,14 @@
         const data = worktime[year][week];
         globalWorkedSeconds += data.workedSeconds;
         globalPlannedSeconds += data.plannedSeconds;
+        globalGleitzeitSeconds += data.gleitzeitSeconds;
         log(
-          `KW${week}: ${fmtDiff(data.workedSeconds, data.plannedSeconds)} ${fmt(
-            globalWorkedSeconds - globalPlannedSeconds,
+          `KW${week}: ${fmtDiff(
+            data.workedSeconds,
+            data.plannedSeconds,
+            data.gleitzeitSeconds
+          )} ${fmt(
+            globalWorkedSeconds - globalPlannedSeconds - globalGleitzeitSeconds,
             true
           )}`
         );
@@ -250,24 +274,38 @@
     });
     const plannedThisWeek =
       currentWeekResponse.employees[0].summary.plannedSeconds;
+
+    const gleitzeitThisWeek = currentWeekResponse.employees[0].days
+      .flatMap((day) =>
+        day.absences
+          .filter((a) => a.typeName === "Gleitzeit")
+          .map((a) => timeAmountToSeconds(a.amount))
+      )
+      .reduce((sum, val) => sum + val, 0);
     log();
     log("Diese Woche:");
+    if (gleitzeitThisWeek) {
+      log(`Gleitzeit: ${fmt(gleitzeitThisWeek)}`);
+    }
     log(
       `&nbsp;&nbsp;${fmtDiff(
         secondsThisWeekWithoutCurrentDay,
-        plannedThisWeek
+        plannedThisWeek,
+        gleitzeitThisWeek
       )} (ohne den aktuellen Tag)`
     );
     log(
       `&nbsp;&nbsp;${fmtDiff(
         secondsThisWeekWithCurrentDay,
-        plannedThisWeek
+        plannedThisWeek,
+        gleitzeitThisWeek
       )} (inkl. dem aktuellen Tag)`
     );
     log(
       `Überstunden diese Woche: ${fmt(
         secondsThisWeekWithoutCurrentDay -
-          plannedSecondsThisWeekWithoutCurrentDay,
+          plannedSecondsThisWeekWithoutCurrentDay -
+          gleitzeitThisWeek,
         true
       )}`
     );
